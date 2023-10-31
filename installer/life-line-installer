@@ -248,22 +248,12 @@ class AppBase(object):
             else:
                 self.msg_download_not_found(this)
                 result = False
-        if self.osVersion() == 'macOS':
-            self.cmd_history("# ** Try to check and modify ~/.zshenv **")
-            self.check_and_modify_zshenv()
-        elif self.osVersion() != 'Alpine' :
-            if self.shellCmd() == '/bin/bash':
-                self.cmd_history("# ** Try to check and modify ~/.bashrc **")
-                self.check_and_modify_bashrc()
-            elif self.shellCmd() == '/bin/ash':
-                self.check_and_modify_bashrc()
-            result = True
-        if result:
-            if verbal:
-                if self.targetApp() == '':
-                    self.msg_install_app_local()
-                else:
-                    self.msg_install_target_local()
+        self.check_env()
+        if verbal:
+            if self.targetApp() == '':
+                self.msg_install_app_local()
+            else:
+                self.msg_install_target_local()
         return result
 
     def __message__(self,message=None):
@@ -420,6 +410,17 @@ class AppBase(object):
             self.__tterm__=''
         return self.__tterm__
 
+    def add_bashprofile_modification(self):
+        # Append the modification lines to .bashrc file
+        modification_lines = [
+            "# modified to add ~/.local/bin to PATH",
+            "PATH=$PATH:~/.local/bin\n"
+        ]
+        
+        with self.open(self.bashprofile(), "a") as file:
+            file.write("\n".join(modification_lines))
+        self.chmod_x(self.bashprofile())    
+
     def add_bashrc_modification(self):
         # Append the modification lines to .bashrc file
         modification_lines = [
@@ -548,6 +549,9 @@ class AppBase(object):
             self.__appName__=''
         return self.__appName__
 
+    def bashprofile(self):
+        return os.path.join(self.home(), ".profile")
+
     def bashrc(self):
         if self.shellCmd() == '/bin/ash':
             return os.path.join(self.home(), ".profile")
@@ -560,6 +564,21 @@ class AppBase(object):
         elif not hasattr(self,'__binary_version__'):
             self.__binary_version__ = ''
         return self.__binary_version__
+
+    def check_env(self):
+        if self.shellCmd() == '/bin/zsh':
+            self.cmd_history("# ** Try to check and modify ~/.zshenv **")
+            self.check_and_modify_zshenv()
+        elif self.shellCmd() == '/bin/bash':
+            self.cmd_history("# ** Try to check and modify ~/.bashrc **")
+            self.check_and_modify_bashrc()
+        elif self.shellCmd() == '/bin/ash':
+            self.cmd_history("# ** Try to check and modify ~/.profile **")
+            self.check_and_modify_bashprofile()
+
+    def check_and_modify_bashprofile(self):
+        if not self.is_bashprofile_modified():
+            self.add_bashprofile_modification()
 
     def check_and_modify_bashrc(self):
         if not self.is_bashrc_modified():
@@ -670,9 +689,12 @@ class AppBase(object):
         if self.isCmd() or self.isGitBash():
             filePath1=self.path_to_dos(filePath1)
             filePath2=self.path_to_dos(filePath2)
-        if self.pathexists(filePath1):
+            cmd = 'copy %s %s' % (filePath1,filePath2)
+        else:        
             cp = self.which_cmd('cp')
-            cmd = '%s %s %s' % (cp,filePath1,filePath2)        
+            cmd = '%s %s %s' % (cp,filePath1,filePath2)
+        shutil.copy(filePath1,filePath2)    
+        if self.pathexists(filePath1):
             if use_history:
                 self.cmd_history(cmd)
             result, stdout = self.shell(cmd)
@@ -860,6 +882,14 @@ class AppBase(object):
                 return result
         return False
 
+    def chdir(self, path):
+        if self.isCmd() or self.isGitBash():
+            self.cmd_history("cd %s" % self.path_to_dos(path))
+            os.chdir(self.path_to_dos(path))
+        else:
+            self.cmd_history("cd %s" % self.tempFolder())
+            os.chdir(path)
+
     def download_and_install_target(self):
         if self.targetApp() == '':
             return False
@@ -867,27 +897,29 @@ class AppBase(object):
         self.download_to_temp(url=self.tempAppUrl(), file=fname, verbal=False)
         if self.pathexists(fname):
             self.cmd_history("# ** Change to temp folder to uncompress **")
-            self.cmd_history("cd %s" % self.tempFolder())
-            os.chdir(self.tempFolder())
-            tar = self.which_cmd('tar')
-            cmd= "%s -xvf %s" % (tar,fname.split('/')[-1])
-            self.cmd_history(cmd)
-            result, stdout = self.shell(cmd, True)
-            if result:
-                if fname.startswith('/tmp'):
-                    self.cmd_history("# ** Try to remove downloaded file **")
-                    self.removeFile(fname)
+            self.chdir(self.tempFolder())
+            
+            if self.isCmd() or self.isGitBash():
+                self.tar_extract( self.path_to_dos(fname).split('\\')[-1] )
+            else:
+                self.tar_extract(fname.split('/')[-1])
+            self.cmd_history("# ** Try to remove downloaded file **")
+            self.removeFile(fname)
+            if self.isCmd() or self.isGitBash():
+                this = "%s.exe" % self.tempAttachDecomp()
+            else:
                 this = self.tempAttachDecomp()
-                if self.pathexists(this):
-                    self.this(this)
-                    if self.username() == 'root':
-                        self.install_target_global(this)
-                    else:
-                        self.install_target_local(this)
-                    return True
+            if self.pathexists(this):
+                self.this(this)
+                if self.username() == 'root':
+                    self.install_target_global(this)
                 else:
-                    self.msg_extraction_error(this)
-                    return False
+                    self.install_target_local(this)
+                return True
+            else:
+                self.cmd_history_print()
+                self.msg_extraction_error(this)
+                return False
         else:
             self.msg_download_error(self.tempTargetGzip())
             return False
@@ -996,14 +1028,16 @@ class AppBase(object):
         if os.path.exists(self.globalFolder(0)):
             self.cmd_history("# ** Copy uncompressed file to target **")
             self.cp(this,file1)
-            self.cmd_history("# ** Change target to executable **")
-            self.chmod_x(file1)
+            if not self.isCmd() and not self.isGitBash():
+                self.cmd_history("# ** Change target to executable **")
+                self.chmod_x(file1)
         elif os.path.exists(self.globalFolder(1)):
             self.cmd_history("# ** Copy uncompressed file to target **")
             self.cp(this,file2)
-            self.cmd_history("# ** Change target to executable **")
-            self.chmod_x(file2)
-        if this.startswith('/tmp'):
+            if not self.isCmd() and not self.isGitBash():
+                self.cmd_history("# ** Change target to executable **")
+                self.chmod_x(file2)
+        if this.startswith('/tmp') or self.isGitBash() or self.isCmd():
             self.cmd_history("# ** Try to remove uncompressed file **")
             self.removeFile(this)
 
@@ -1011,18 +1045,21 @@ class AppBase(object):
         self.mkdir( self.localInstallFolder() )
         if self.targetApp() != '':
             self.cmd_history("# ** Try to remove previous version **")
-            self.removeFile("%s/%s" % (self.localInstallFolder(), self.targetApp()))
+            self.removeFile(self.localTargetInstallPath())
         self.cmd_history("# ** Copy uncompressed file to target **")
         self.cp(this, self.localInstallFolder())
-        self.cmd_history("# ** Change target to executable **")
-        result = self.chmod_x("%s/%s" % (self.localInstallFolder(), self.targetApp()))
-        if this.startswith('/tmp'):
+        if not self.isCmd() and not self.isGitBash():
+            self.cmd_history("# ** Change target to executable **")
+            result = self.chmod_x(self.localTargetInstallPath())
+        if this.startswith('/tmp') or self.isCmd() or self.isGitBash():
             self.cmd_history("# ** Try to remove downloaded file **")
             self.removeFile(this)
-        if self.osVersion() == 'macOS':
-            self.check_and_modify_zshenv()
-        elif self.osVersion() != 'Alpine' :
-            self.check_and_modify_bashrc()
+        self.check_env()
+
+    def is_bashprofile_modified(self):
+        # Check if .bashrc file exists and if it contains the modification lines
+        if not os.path.isfile(self.bashrc()):
+            return False
 
     def is_bashrc_modified(self):
         # Check if .bashrc file exists and if it contains the modification lines
@@ -1165,6 +1202,12 @@ class AppBase(object):
             return '%s\\%s.bat' % (self.localInstallFolder(), self.appName())
         else:
             return os.path.abspath('%s/%s' % (self.localInstallFolder(), self.appName()))
+
+    def localTargetInstallPath(self):
+        if self.isCmd() or self.isGitBash():
+            return '%s\\%s.exe' % (self.localInstallFolder(), self.targetApp())
+        else:
+            return os.path.abspath('%s/%s' % (self.localInstallFolder(), self.targetApp()))
 
     def majorVersion(self, majorVersion=None):
         if majorVersion is not None:
@@ -1537,11 +1580,11 @@ class AppBase(object):
 
     def selfUninstallLocal(self, verbal = True):
         if self.installedLocal():
+            self.cmd_history("# ** Try to remove previous installed version **")
             self.removeFile(self.localInstallPath())
             if not os.path.exists(self.localInstallPath()):
                 if self.targetApp() != '':
-                    self.cmd_history("# ** Try to remove previous installed version **")
-                    self.removeFile("%s/%s" % (self.localInstallFolder(), self.targetApp()))
+                    self.removeFile(self.localTargetInstallPath())
                 if verbal:
                     self.cmd_history_print()
                     self.msg_uninstall_local()
@@ -1564,11 +1607,13 @@ class AppBase(object):
         self.majorVersion( majorVersion )
         self.minorVersion( minorVersion )
 
-    def shell(self, command='', ignoreErr=False, ignoreShell=False):
+    def shell(self, command='', ignoreErr=False, ignoreShell=False, ignoreAll=False):
         stderr = ''
         stdout = ''
         useWinpty = False
-        if ignoreShell:
+        if ignoreAll:
+            pipe_array=[]
+        elif ignoreShell:
             if self.isGitBash():
                 winpty = self.where_cmd('winpty.exe')
                 if winpty == "":
@@ -1583,9 +1628,9 @@ class AppBase(object):
         elif self.isGitBash():
             winpty = self.where_cmd('winpty.exe')
             if winpty == "":
-                useWinpty = True
                 pipe_array=[self.shellCmd(),'-c']
             else:
+                useWinpty = True
                 pipe_array=[winpty, self.shellCmd(),'-c']
         elif self.isCmd():
             pipe_array=[self.shellCmd(),'/c']
@@ -1602,8 +1647,14 @@ class AppBase(object):
                 return True, ""
             else:
                 return False, "Wrong command data type."
-        stdout,stderr = Popen(pipe_array,stdin=PIPE,stdout=PIPE,\
-            stderr=PIPE,universal_newlines=True).communicate('\n')
+        try:
+            stdout,stderr = Popen(pipe_array,stdin=PIPE,stdout=PIPE,\
+                stderr=PIPE,universal_newlines=True).communicate('\n')
+        except:
+            if ignoreErr:
+                return True
+            else:
+                return False
         if stderr.strip().lower() == 'stdin is not a tty' and useWinpty:
             stdout,stderr = Popen(pipe_array[1:],stdin=PIPE,stdout=PIPE,\
                 stderr=PIPE,universal_newlines=True).communicate('\n')
@@ -1685,6 +1736,15 @@ class AppBase(object):
         elif not hasattr( self, '__TAG__' ):
             self.__TAG__=''
         return self.__TAG__
+
+    def tar_extract(self,fname):
+        if self.isCmd() or self.isGitBash():
+            tar = self.where_cmd('tar.exe')
+        else:
+            tar = self.which_cmd('tar')
+        cmd= [tar,"-xvf", fname]
+        self.cmd_history(" ".join(cmd))
+        result, stdout = self.shell(cmd,ignoreErr=True,ignoreAll=True)
 
     def targetApp(self, app=None):
         if app is not None:
@@ -1978,14 +2038,14 @@ class AppBase(object):
             spaces.append([])
             msg.append('Target Application:')
             if self.isCmd() or self.isGitBash():
-                file3 = "%s\\%s" % (self.localInstallFolder(), self.targetApp())
+                file3 = self.localTargetInstallPath()
                 if os.path.exists(file3):
                     msg.append('    %s' % file3)
                     spaces.append([])
             else:
                 file1 = "%s/%s" % (self.globalFolder(0), self.targetApp())
                 file2 = "%s/%s" % (self.globalFolder(1), self.targetApp())
-                file3 = "%s/%s" % (self.localInstallFolder(), self.targetApp())
+                file3 = self.localTargetInstallPath()
                 if os.path.exists(file1):
                     msg.append('    %s' % file1)
                     spaces.append([])
@@ -2047,13 +2107,13 @@ class AppBase(object):
 
     def msg_install_target_global(self, title="INSTALL"):
         if self.isCmd() or self.isGitBash():
-            self.msg_install(location='Globally', app="%s.bat" % self.targetApp(), title=title)
+            self.msg_install(location='Globally', app="%s.exe" % self.targetApp(), title=title)
         else:
             self.msg_install(location='Globally', app=self.targetApp(), title=title)
 
     def msg_install_target_local(self, title="INSTALL"):
         if self.isCmd() or self.isGitBash():
-            self.msg_install(location='Locally', app="%s.bat" % self.targetApp(), title=title)
+            self.msg_install(location='Locally', app="%s.exe" % self.targetApp(), title=title)
         else:
             self.msg_install(location='Locally', app=self.targetApp(), title=title)
 
